@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Booklet Imposer — A4 → A6</title>
+  <title>Booklet Imposer — A4 → A6 (Auto Flip Backs)</title>
   <style>
     body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:#f7f7f8; padding:18px; color:#111 }
     .container{max-width:980px;margin:0 auto;background:#fff;padding:18px;border-radius:8px;box-shadow:0 6px 22px rgba(0,0,0,.06)}
@@ -18,7 +18,7 @@
 <body>
   <div class="container">
     <h1>Booklet Imposer — A4 → A6 (16pp / A4 sheet)</h1>
-    <p class="small">Upload image files named by page number (e.g. <code>1.png</code>, <code>2.jpg</code>). The tool will sort them and impose into A4 sheets (8 A6 slots). Click <strong>Generate PDF</strong> when ready.</p>
+    <p class="small">Upload image files named by page number (e.g. <code>1.png</code>, <code>2.jpg</code>). The tool will sort them and impose into A4 sheets (8 A6 slots). Every second side is flipped for double-sided printing. Click <strong>Generate PDF</strong> when ready.</p>
 
     <div class="controls">
       <input id="fileInput" type="file" accept="image/*,image/png,image/jpeg" multiple />
@@ -32,29 +32,20 @@
       <pre id="pattern" class="small"></pre>
     </details>
 
-    <p class="small" style="margin-top:12px">Note: This runs in your browser. For higher print DPI edit the code or run locally with a bundler.</p>
+    <p class="small" style="margin-top:12px">Note: This runs fully in your browser. For higher DPI or exact bleed alignment, tweak the <code>dpi</code> value in the code.</p>
   </div>
 
-  <!-- React + ReactDOM (UMD) and Babel (to allow JSX) -->
+  <!-- React + Babel + jsPDF -->
   <script src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
-
-  <!-- jsPDF (UMD) -->
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 
-  <!-- The app (JSX) -->
   <script type="text/babel">
-  const { useState, useRef } = React;
-
-  function humanMsg(s){ document.getElementById('status').textContent = s; }
-
-  // Imposition orders (our pattern per signature of 16)
   const frontOrder = [16,12,1,5,14,10,3,7];
   const backOrder  = [15,11,2,6,13,9,4,8];
   document.getElementById('pattern').textContent = 'Front: ' + frontOrder.join(', ') + '\\nBack:  ' + backOrder.join(', ');
 
-  // helper load image
   function loadImageFromFile(file){
     return new Promise((res, rej) => {
       const url = URL.createObjectURL(file);
@@ -66,10 +57,11 @@
   }
 
   function App(){
-    const [files, setFiles] = useState([]);
-    const fileInput = useRef();
+    const [files, setFiles] = React.useState([]);
+    const fileInput = React.useRef();
 
-    // when user picks files
+    function msg(s){ document.getElementById('status').textContent = s; }
+
     async function handleFiles(e){
       const fl = Array.from(e.target.files || []);
       const imgs = fl.filter(f => /image\\/(png|jpe?g)/.test(f.type));
@@ -78,156 +70,112 @@
         const m = base.match(/(\\d+)/);
         const n = m ? parseInt(m[1],10) : null;
         return { file: f, index: n, name: f.name };
-      });
-      parsed.sort((a,b)=>{
+      }).sort((a,b)=>{
         if(a.index==null && b.index==null) return a.name.localeCompare(b.name);
         if(a.index==null) return 1;
         if(b.index==null) return -1;
         return a.index - b.index;
       });
       setFiles(parsed);
-      humanMsg(parsed.length + ' image(s) loaded');
+      msg(parsed.length + ' image(s) loaded');
     }
 
-    // Clear
     function clearAll(){
       setFiles([]);
       fileInput.current.value = null;
-      humanMsg('Cleared');
+      msg('Cleared');
     }
 
-    // Generate PDF
     async function generate(){
-      if(!files.length){ humanMsg('No files'); return; }
-      humanMsg('Loading images...');
-      // load images and build pageMap (1-based)
+      if(!files.length){ msg('No files'); return; }
+      msg('Loading images...');
       const pages = [];
       for(const p of files){
         try{
           const img = await loadImageFromFile(p.file);
-          pages.push({img, index: p.index ?? null});
-        }catch(e){
-          console.warn('image load error', e);
-        }
+          pages.push({img, index: p.index});
+        }catch(e){ console.warn('load fail', e); }
       }
-      // sort by index (pages with no index go after)
-      pages.sort((a,b)=>{
-        if(a.index==null && b.index==null) return 0;
-        if(a.index==null) return 1;
-        if(b.index==null) return -1;
-        return a.index - b.index;
-      });
-      // map into pageMap where pageMap[n] = HTMLImageElement
-      let maxPage = 0;
+      pages.sort((a,b)=>a.index-b.index);
       const pageMap = [];
-      let cur = 1;
+      let maxPage = 0;
       for(const p of pages){
-        const idx = p.index ?? cur;
-        pageMap[idx] = p.img;
-        maxPage = Math.max(maxPage, idx);
-        cur++;
+        pageMap[p.index] = p.img;
+        maxPage = Math.max(maxPage,p.index);
       }
 
-      const totalPages = Math.max(maxPage, pages.length);
+      const totalPages = maxPage;
       const pagesPerSheet = 16;
       const numSheets = Math.ceil(totalPages / pagesPerSheet);
-      humanMsg('Rendering ' + numSheets + ' A4 sheet(s)...');
+      msg('Rendering ' + numSheets + ' sheet(s)...');
 
-      // A4 mm
       const a4mm = { w:210, h:297 };
-      // We'll place images using canvas then add to jsPDF as JPEG.
-      const dpi = 150; // tweak for quality/perf
-      const pxPerMm = dpi / 25.4;
+      const dpi = 150, pxPerMm = dpi/25.4;
       const a4px = { w: Math.round(a4mm.w * pxPerMm), h: Math.round(a4mm.h * pxPerMm) };
-
       const { jsPDF } = window.jspdf;
-      const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
+      const pdf = new jsPDF({ unit:'mm', format:'a4' });
 
-      // draw helper
-      async function drawSide(imgArray){
+      async function drawSide(imgArray, flip){
         const canvas = document.createElement('canvas');
         canvas.width = a4px.w; canvas.height = a4px.h;
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-        const marginPx = Math.round(5 * pxPerMm);
-        const cols = 2, rows = 4;
+        ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        const marginPx = Math.round(5*pxPerMm);
+        const cols=2, rows=4;
         const usableW = canvas.width - marginPx*2;
         const usableH = canvas.height - marginPx*2;
-        const cellW = Math.floor(usableW / cols);
-        const cellH = Math.floor(usableH / rows);
+        const cellW = usableW / cols;
+        const cellH = usableH / rows;
+
+        ctx.save();
+        if(flip){
+          // Flip horizontally + vertically
+          ctx.translate(canvas.width, canvas.height);
+          ctx.rotate(Math.PI);
+        }
 
         for(let i=0;i<8;i++){
-          const img = imgArray[i] || null;
-          const col = i % cols, row = Math.floor(i/cols);
+          const img = imgArray[i];
+          const col = i%cols, row=Math.floor(i/cols);
           const x = marginPx + col*cellW;
           const y = marginPx + row*cellH;
-          ctx.strokeStyle = '#f0f0f0';
-          ctx.strokeRect(x+2,y+2,cellW-4,cellH-4);
           if(img){
-            // fit preserving aspect
-            const padW = cellW * 0.94, padH = cellH * 0.94;
-            const scale = Math.min(padW/img.width, padH/img.height);
-            const dw = img.width * scale, dh = img.height * scale;
-            const dx = x + (cellW - dw)/2, dy = y + (cellH - dh)/2;
-            ctx.drawImage(img, dx, dy, dw, dh);
+            const padW=cellW*0.94, padH=cellH*0.94;
+            const scale=Math.min(padW/img.width, padH/img.height);
+            const dw=img.width*scale, dh=img.height*scale;
+            const dx=x+(cellW-dw)/2, dy=y+(cellH-dh)/2;
+            ctx.drawImage(img,dx,dy,dw,dh);
           }
         }
-        const dataURL = canvas.toDataURL('image/jpeg', 0.9);
-        pdf.addImage(dataURL, 'JPEG', 0, 0, a4mm.w, a4mm.h);
+        ctx.restore();
+        const dataURL=canvas.toDataURL('image/jpeg',0.9);
+        pdf.addImage(dataURL,'JPEG',0,0,a4mm.w,a4mm.h);
         pdf.addPage();
       }
 
       for(let s=0;s<numSheets;s++){
-        const base = s * pagesPerSheet;
-        // prepare front
-        const frontImgs = frontOrder.map(k => pageMap[base + k] || null);
-        await drawSide(frontImgs);
-        // prepare back
-        const backImgs = backOrder.map(k => pageMap[base + k] || null);
-        await drawSide(backImgs);
-        humanMsg('Rendered sheet ' + (s+1) + ' of ' + numSheets);
+        const base = s*pagesPerSheet;
+        const frontImgs = frontOrder.map(k=>pageMap[base+k]||null);
+        const backImgs  = backOrder.map(k=>pageMap[base+k]||null);
+
+        await drawSide(frontImgs,false);     // normal front
+        await drawSide(backImgs,true);       // flipped back
+        msg('Rendered sheet ' + (s+1) + ' of ' + numSheets);
       }
 
-      // remove last blank added page
       pdf.deletePage(pdf.getNumberOfPages());
-      pdf.save('booklet-imposed-a4.pdf');
-      humanMsg('Done — download should start');
+      pdf.save('booklet-flipped.pdf');
+      msg('Done — download started');
     }
 
-    // attach events to plain DOM elements
-    React.useEffect(() => {
-      const fi = document.getElementById('fileInput');
-      fi.addEventListener('change', handleFileChangeDOM);
-      function handleFileChangeDOM(e){
-        const fl = Array.from(e.target.files || []);
-        // sync with React state
-        const imgs = fl.filter(f => /image\\/(png|jpe?g)/.test(f.type));
-        const parsed = imgs.map(f => {
-          const base = f.name.replace(/\\.[^/.]+$/,'');
-          const m = base.match(/(\\d+)/);
-          const n = m ? parseInt(m[1],10) : null;
-          return { file: f, index: n, name: f.name };
-        });
-        parsed.sort((a,b)=>{
-          if(a.index==null && b.index==null) return a.name.localeCompare(b.name);
-          if(a.index==null) return 1;
-          if(b.index==null) return -1;
-          return a.index - b.index;
-        });
-        setFiles(parsed);
-        humanMsg(parsed.length + ' images loaded');
-      }
+    React.useEffect(()=>{
+      document.getElementById('fileInput').addEventListener('change',handleFiles);
+      document.getElementById('generateBtn').onclick=generate;
+      document.getElementById('clearBtn').onclick=clearAll;
+      return ()=>{};
+    },[]);
 
-      document.getElementById('generateBtn').onclick = generate;
-      document.getElementById('clearBtn').onclick = () => { setFiles([]); document.getElementById('fileInput').value = null; humanMsg('Cleared'); }
-
-      return () => {
-        fi.removeEventListener('change', handleFileChangeDOM);
-      }
-    }, []);
-
-    // show minimal React UI placeholder
-    return React.createElement('div', null, null);
+    return React.createElement('div', null);
   }
 
   ReactDOM.render(React.createElement(App), document.body.appendChild(document.createElement('div')));
