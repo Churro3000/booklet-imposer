@@ -3,36 +3,38 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Booklet Imposer — A4 → A6 (Auto Flip Backs)</title>
+  <title>Booklet Imposer — A4 → A6 (16pp / sheet)</title>
   <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:#f7f7f8; padding:18px; color:#111 }
+    body {font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f7f7f8;padding:18px;color:#111}
     .container{max-width:980px;margin:0 auto;background:#fff;padding:18px;border-radius:8px;box-shadow:0 6px 22px rgba(0,0,0,.06)}
     h1{margin:0 0 10px;font-size:20px}
     .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-    input[type=file]{display:block}
     button{background:#0069ff;color:#fff;padding:8px 12px;border-radius:6px;border:0;cursor:pointer}
+    button:disabled{background:#aaa;cursor:default}
     .small{font-size:13px;color:#555}
     pre{background:#f4f4f6;padding:10px;border-radius:6px;overflow:auto}
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Booklet Imposer — A4 → A6 (16pp / A4 sheet)</h1>
-    <p class="small">Upload image files named by page number (e.g. <code>1.png</code>, <code>2.jpg</code>). The tool will sort them and impose into A4 sheets (8 A6 slots). Every second side is flipped for double-sided printing. Click <strong>Generate PDF</strong> when ready.</p>
+    <h1>Booklet Imposer — A4 → A6 (16pp / sheet)</h1>
+    <p class="small">
+      Upload images named by page number (<code>1.png</code>, <code>2.jpg</code> …).  
+      The tool will sort them, impose 8 A6 cells per A4 side, and flip every back-side for duplex printing.
+    </p>
 
     <div class="controls">
-      <input id="fileInput" type="file" accept="image/*,image/png,image/jpeg" multiple />
+      <input id="fileInput" type="file" accept="image/*" multiple />
       <button id="generateBtn">Generate PDF</button>
       <button id="clearBtn" style="background:#999">Clear</button>
     </div>
 
     <div id="status" class="small">No files loaded</div>
 
-    <details style="margin-top:12px"><summary>Imposition pattern used (one signature of 16 pages)</summary>
+    <details style="margin-top:12px">
+      <summary>Imposition pattern (one 16-page signature)</summary>
       <pre id="pattern" class="small"></pre>
     </details>
-
-    <p class="small" style="margin-top:12px">Note: This runs fully in your browser. For higher DPI or exact bleed alignment, tweak the <code>dpi</code> value in the code.</p>
   </div>
 
   <!-- React + Babel + jsPDF -->
@@ -42,143 +44,170 @@
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 
   <script type="text/babel">
-  const frontOrder = [16,12,1,5,14,10,3,7];
-  const backOrder  = [15,11,2,6,13,9,4,8];
-  document.getElementById('pattern').textContent = 'Front: ' + frontOrder.join(', ') + '\\nBack:  ' + backOrder.join(', ');
+    // ----- imposition order for ONE 16-page signature -----
+    const frontOrder = [16,12,1,5,14,10,3,7];
+    const backOrder  = [15,11,2,6,13,9,4,8];
+    document.getElementById('pattern').textContent =
+      'Front: ' + frontOrder.join(', ') + '\nBack : ' + backOrder.join(', ');
 
-  function loadImageFromFile(file){
-    return new Promise((res, rej) => {
+    const PAGES_PER_SHEET = 16;
+    const CELLS_PER_SIDE  = 8;               // 2 columns × 4 rows
+    const DPI = 150;
+    const PX_PER_MM = DPI / 25.4;
+    const A4_MM = {w:210, h:297};
+    const A4_PX = {
+      w: Math.round(A4_MM.w * PX_PER_MM),
+      h: Math.round(A4_MM.h * PX_PER_MM)
+    };
+    const MARGIN_MM = 5;
+    const MARGIN_PX = Math.round(MARGIN_MM * PX_PER_MM);
+
+    // ---- helper: load image from File object ----
+    const loadImage = file => new Promise((res, rej) => {
       const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => { URL.revokeObjectURL(url); res(img); };
-      img.onerror = (e) => { URL.revokeObjectURL(url); rej(e); };
+      img.onerror = e => { URL.revokeObjectURL(url); rej(e); };
       img.src = url;
     });
-  }
 
-  function App(){
-    const [files, setFiles] = React.useState([]);
-    const fileInput = React.useRef();
+    // ---- React app -------------------------------------------------
+    function App() {
+      const [pageFiles, setPageFiles] = React.useState([]); // {idx, file}
+      const fileInputRef = React.useRef();
 
-    function msg(s){ document.getElementById('status').textContent = s; }
+      const setStatus = txt => document.getElementById('status').textContent = txt;
 
-    async function handleFiles(e){
-      const fl = Array.from(e.target.files || []);
-      const imgs = fl.filter(f => /image\\/(png|jpe?g)/.test(f.type));
-      const parsed = imgs.map(f => {
-        const base = f.name.replace(/\\.[^/.]+$/,'');
-        const m = base.match(/(\\d+)/);
-        const n = m ? parseInt(m[1],10) : null;
-        return { file: f, index: n, name: f.name };
-      }).sort((a,b)=>{
-        if(a.index==null && b.index==null) return a.name.localeCompare(b.name);
-        if(a.index==null) return 1;
-        if(b.index==null) return -1;
-        return a.index - b.index;
-      });
-      setFiles(parsed);
-      msg(parsed.length + ' image(s) loaded');
-    }
+      // ---- file selection ------------------------------------------------
+      const onFiles = async e => {
+        const files = Array.from(e.target.files || []);
+        const imgs = files.filter(f => /^image\//.test(f.type));
 
-    function clearAll(){
-      setFiles([]);
-      fileInput.current.value = null;
-      msg('Cleared');
-    }
+        const parsed = imgs.map(f => {
+          const name = f.name.replace(/\.[^.]+$/,'');          // strip extension
+          const m = name.match(/(\d+)/);
+          const idx = m ? parseInt(m[1],10) : null;
+          return {idx, file: f};
+        }).filter(p => p.idx !== null)                     // keep only numbered files
+          .sort((a,b) => a.idx - b.idx);
 
-    async function generate(){
-      if(!files.length){ msg('No files'); return; }
-      msg('Loading images...');
-      const pages = [];
-      for(const p of files){
-        try{
-          const img = await loadImageFromFile(p.file);
-          pages.push({img, index: p.index});
-        }catch(e){ console.warn('load fail', e); }
-      }
-      pages.sort((a,b)=>a.index-b.index);
-      const pageMap = [];
-      let maxPage = 0;
-      for(const p of pages){
-        pageMap[p.index] = p.img;
-        maxPage = Math.max(maxPage,p.index);
-      }
+        setPageFiles(parsed);
+        setStatus(`${parsed.length} page(s) loaded`);
+      };
 
-      const totalPages = maxPage;
-      const pagesPerSheet = 16;
-      const numSheets = Math.ceil(totalPages / pagesPerSheet);
-      msg('Rendering ' + numSheets + ' sheet(s)...');
+      const clear = () => {
+        setPageFiles([]);
+        fileInputRef.current.value = null;
+        setStatus('Cleared');
+      };
 
-      const a4mm = { w:210, h:297 };
-      const dpi = 150, pxPerMm = dpi/25.4;
-      const a4px = { w: Math.round(a4mm.w * pxPerMm), h: Math.round(a4mm.h * pxPerMm) };
-      const { jsPDF } = window.jspdf;
-      const pdf = new jsPDF({ unit:'mm', format:'a4' });
+      // ---- PDF generation ------------------------------------------------
+      const generate = async () => {
+        if (!pageFiles.length) { setStatus('No pages'); return; }
+        setStatus('Loading images…');
 
-      async function drawSide(imgArray, flip){
-        const canvas = document.createElement('canvas');
-        canvas.width = a4px.w; canvas.height = a4px.h;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-        const marginPx = Math.round(5*pxPerMm);
-        const cols=2, rows=4;
-        const usableW = canvas.width - marginPx*2;
-        const usableH = canvas.height - marginPx*2;
-        const cellW = usableW / cols;
-        const cellH = usableH / rows;
-
-        ctx.save();
-        if(flip){
-          // Flip horizontally + vertically
-          ctx.translate(canvas.width, canvas.height);
-          ctx.rotate(Math.PI);
+        // load all images
+        const imgMap = {};                     // idx → HTMLImageElement
+        for (const {idx, file} of pageFiles) {
+          try { imgMap[idx] = await loadImage(file); }
+          catch (e) { console.warn('failed', idx, e); }
         }
 
-        for(let i=0;i<8;i++){
-          const img = imgArray[i];
-          const col = i%cols, row=Math.floor(i/cols);
-          const x = marginPx + col*cellW;
-          const y = marginPx + row*cellH;
-          if(img){
-            const padW=cellW*0.94, padH=cellH*0.94;
-            const scale=Math.min(padW/img.width, padH/img.height);
-            const dw=img.width*scale, dh=img.height*scale;
-            const dx=x+(cellW-dw)/2, dy=y+(cellH-dh)/2;
-            ctx.drawImage(img,dx,dy,dw,dh);
+        // determine total pages & pad to multiple of 16
+        const maxIdx = Math.max(...Object.keys(imgMap).map(Number));
+        const totalPages = Math.ceil((maxIdx + 1) / PAGES_PER_SHEET) * PAGES_PER_SHEET;
+        const numSheets = totalPages / PAGES_PER_SHEET;
+
+        setStatus(`Rendering ${numSheets} sheet(s)…`);
+
+        const {jsPDF} = window.jspdf;
+        const pdf = new jsPDF({unit:'mm', format:'a4'});
+
+        // reusable canvas drawer
+        const drawSide = async (orderArray, doFlip) => {
+          const canvas = document.createElement('canvas');
+          canvas.width  = A4_PX.w;
+          canvas.height = A4_PX.h;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+
+          // optional 180° flip for back sides
+          if (doFlip) {
+            ctx.translate(canvas.width, canvas.height);
+            ctx.rotate(Math.PI);
           }
+
+          const usableW = canvas.width  - 2*MARGIN_PX;
+          const usableH = canvas.height - 2*MARGIN_PX;
+          const cellW = usableW / 2;
+          const cellH = usableH / 4;
+
+          for (let i=0; i<CELLS_PER_SIDE; i++) {
+            const pageNum = orderArray[i];
+            const img = imgMap[pageNum] || null;
+
+            const col = i % 2;
+            const row = Math.floor(i / 2);
+            const x = MARGIN_PX + col * cellW;
+            const y = MARGIN_PX + row * cellH;
+
+            if (img) {
+              const pad = 0.94;                     // 6 % gutter
+              const scale = Math.min((cellW*pad)/img.width, (cellH*pad)/img.height);
+              const dw = img.width * scale;
+              const dh = img.height * scale;
+              const dx = x + (cellW - dw)/2;
+              const dy = y + (cellH - dh)/2;
+              ctx.drawImage(img, dx, dy, dw, dh);
+            }
+          }
+
+          const dataURL = canvas.toDataURL('image/jpeg', 0.92);
+          pdf.addImage(dataURL, 'JPEG', 0, 0, A4_MM.w, A4_MM.h);
+          pdf.addPage();
+        };
+
+        // ---- build each sheet (front + back) ----
+        for (let s=0; s<numSheets; s++) {
+          const base = s * PAGES_PER_SHEET + 1;   // page numbers start at 1
+
+          const front = frontOrder.map(off => base + off - 1);
+          const back  = backOrder .map(off => base + off - 1);
+
+          await drawSide(front, false);   // front side – normal orientation
+          await drawSide(back , true );   // back side  – 180° flipped
+
+          setStatus(`Sheet ${s+1}/${numSheets} done`);
         }
-        ctx.restore();
-        const dataURL=canvas.toDataURL('image/jpeg',0.9);
-        pdf.addImage(dataURL,'JPEG',0,0,a4mm.w,a4mm.h);
-        pdf.addPage();
-      }
 
-      for(let s=0;s<numSheets;s++){
-        const base = s*pagesPerSheet;
-        const frontImgs = frontOrder.map(k=>pageMap[base+k]||null);
-        const backImgs  = backOrder.map(k=>pageMap[base+k]||null);
+        // remove the extra empty page jsPDF adds after the last addPage()
+        pdf.deletePage(pdf.getNumberOfPages());
+        pdf.save('booklet.pdf');
+        setStatus('Download started');
+      };
 
-        await drawSide(frontImgs,false);     // normal front
-        await drawSide(backImgs,true);       // flipped back
-        msg('Rendered sheet ' + (s+1) + ' of ' + numSheets);
-      }
+      // ---- wiring ----
+      React.useEffect(() => {
+        const fi = document.getElementById('fileInput');
+        const gen = document.getElementById('generateBtn');
+        const clr = document.getElementById('clearBtn');
 
-      pdf.deletePage(pdf.getNumberOfPages());
-      pdf.save('booklet-flipped.pdf');
-      msg('Done — download started');
+        fi.addEventListener('change', onFiles);
+        gen.onclick = generate;
+        clr.onclick = clear;
+
+        return () => {
+          fi.removeEventListener('change', onFiles);
+          gen.onclick = null;
+          clr.onclick = null;
+        };
+      }, []);
+
+      return null;   // UI is pure HTML above
     }
 
-    React.useEffect(()=>{
-      document.getElementById('fileInput').addEventListener('change',handleFiles);
-      document.getElementById('generateBtn').onclick=generate;
-      document.getElementById('clearBtn').onclick=clearAll;
-      return ()=>{};
-    },[]);
-
-    return React.createElement('div', null);
-  }
-
-  ReactDOM.render(React.createElement(App), document.body.appendChild(document.createElement('div')));
+    ReactDOM.render(React.createElement(App), document.body.appendChild(document.createElement('div')));
   </script>
 </body>
 </html>
